@@ -101,6 +101,10 @@ func runSupfile(errStream io.Writer, options options, args []string) error {
 	if err != nil {
 		return err
 	}
+	conf.ResolveIncludes(errStream, func(filename string) ([]byte, error) {
+		options.supfile = filename
+		return readSupfile(options)
+	})
 	// Parse network and commands to be run from flags.
 	network, commands, err := parseArgs(errStream, options, args, conf)
 	if err != nil {

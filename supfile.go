@@ -15,11 +15,12 @@ import (
 
 // Supfile represents the Stack Up configuration YAML file.
 type Supfile struct {
-	Networks Networks `yaml:"networks"`
-	Commands Commands `yaml:"commands"`
-	Targets  Targets  `yaml:"targets"`
-	Env      EnvList  `yaml:"env"`
-	Version  string   `yaml:"version"`
+	Networks Networks  `yaml:"networks"`
+	Commands Commands  `yaml:"commands"`
+	Targets  Targets   `yaml:"targets"`
+	Env      EnvList   `yaml:"env"`
+	Version  string    `yaml:"version"`
+	Includes []Include `yaml:"includes"`
 }
 
 // Network is group of hosts with extra custom env vars.
@@ -46,18 +47,18 @@ func (n *Networks) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return err
 	}
 
-	var items yaml.MapSlice
-	err = unmarshal(&items)
-	if err != nil {
-		return err
-	}
-
-	n.Names = make([]string, len(items))
-	for i, item := range items {
-		n.Names[i] = item.Key.(string)
-	}
+	n.reindex()
 
 	return nil
+}
+
+func (n *Networks) reindex() {
+	n.Names = make([]string, len(n.nets))
+	i := 0
+	for name := range n.nets {
+		n.Names[i] = name
+		i++
+	}
 }
 
 func (n *Networks) Get(name string) (Network, bool) {
@@ -70,8 +71,8 @@ type Command struct {
 	Name   string   `yaml:"-"`      // Command name.
 	Desc   string   `yaml:"desc"`   // Command description.
 	Local  string   `yaml:"local"`  // Command(s) to be run locally.
-	Run    string   `yaml:"run"`    // Command(s) to be run remotelly.
-	Script string   `yaml:"script"` // Load command(s) from script and run it remotelly.
+	Run    string   `yaml:"run"`    // Command(s) to be run remotely.
+	Script string   `yaml:"script"` // Load command(s) from script and run it remotely.
 	Upload []Upload `yaml:"upload"` // See Upload struct.
 	Stdin  bool     `yaml:"stdin"`  // Attach localhost STDOUT to remote commands' STDIN?
 	Once   bool     `yaml:"once"`   // The command should be run "once" (on one host only).
@@ -99,12 +100,18 @@ func (c *Commands) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return err
 	}
 
-	c.Names = make([]string, len(items))
-	for i, item := range items {
-		c.Names[i] = item.Key.(string)
-	}
+	c.reindex()
 
 	return nil
+}
+
+func (c *Commands) reindex() {
+	c.Names = make([]string, len(c.cmds))
+	i := 0
+	for name := range c.cmds {
+		c.Names[i] = name
+		i++
+	}
 }
 
 func (c *Commands) Get(name string) (Command, bool) {
@@ -124,23 +131,28 @@ func (t *Targets) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return err
 	}
 
-	var items yaml.MapSlice
-	err = unmarshal(&items)
-	if err != nil {
-		return err
-	}
-
-	t.Names = make([]string, len(items))
-	for i, item := range items {
-		t.Names[i] = item.Key.(string)
-	}
+	t.reindex()
 
 	return nil
+}
+
+func (t *Targets) reindex() {
+	t.Names = make([]string, len(t.targets))
+	i := 0
+	for name := range t.targets {
+		t.Names[i] = name
+		i++
+	}
 }
 
 func (t *Targets) Get(name string) ([]string, bool) {
 	cmds, ok := t.targets[name]
 	return cmds, ok
+}
+
+type Include struct {
+	Supfile string   `yaml:"supfile"`
+	Env     []string `yaml:"env"`
 }
 
 // Upload represents file copy operation from localhost Src path to Dst
@@ -200,6 +212,17 @@ func (e *EnvList) Set(key, value string) {
 		Key:   key,
 		Value: value,
 	})
+}
+
+// Get value by key.
+func (e *EnvList) Get(key string) string {
+	for _, v := range *e {
+		if v.Key == key {
+			return v.Value
+		}
+	}
+
+	return ""
 }
 
 func (e *EnvList) ResolveValues() error {
@@ -311,12 +334,67 @@ func NewSupfile(errStream io.Writer, data []byte) (*Supfile, error) {
 		fallthrough
 
 	case "0.4", "0.5":
+		if len(conf.Includes) > 0 {
+			return nil, ErrMustUpdate{"includes are not supported in Supfile v" + conf.Version}
+		}
+
+	case "0.6":
 
 	default:
 		return nil, ErrUnsupportedSupfileVersion{"unsupported Supfile version " + conf.Version}
 	}
 
 	return &conf, nil
+}
+
+// @TODO check version of the included file to be suported
+func (conf *Supfile) ResolveIncludes(errStream io.Writer, reader func(filename string) ([]byte, error)) error {
+	for _, include := range conf.Includes {
+		data, err := reader(include.Supfile)
+		if err != nil {
+			return err
+		}
+		included, err := NewSupfile(errStream, data)
+		if err != nil {
+			return err
+		}
+
+		*conf = included.merge(conf, include.Env)
+	}
+	return nil
+}
+
+func (conf Supfile) merge(other *Supfile, injected []string ) Supfile {
+	var combinedEnv EnvList
+	for _, inj := range injected {
+		combinedEnv.Set(inj, other.Env.Get(inj))
+	}
+
+	for _, env := range conf.Env {
+		combinedEnv.Set(env.Key, env.Value)
+	}
+	for _, env := range other.Env {
+		// adding injected again is a no-op, order is not altered
+		combinedEnv.Set(env.Key, env.Value)
+	}
+	conf.Env = combinedEnv
+
+	for name, network := range other.Networks.nets {
+		conf.Networks.nets[name] = network
+	}
+	conf.Networks.reindex()
+
+	for name, command := range other.Commands.cmds {
+		conf.Commands.cmds[name] = command
+	}
+	conf.Commands.reindex()
+
+	for name, target := range other.Targets.targets {
+		conf.Targets.targets[name] = target
+	}
+	conf.Targets.reindex()
+
+	return conf
 }
 
 // ParseInventory runs the inventory command, if provided, and appends

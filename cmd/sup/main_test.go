@@ -1082,6 +1082,335 @@ commands:
 	})
 }
 
+func TestInclude(t *testing.T) {
+	t.Parallel()
+
+	masterInput := `
+---
+version: 0.4
+
+env:
+  INCLUDED_VAR: I am included
+  VAR_TO_BE_OVERWRITTEN: I will not last
+  MIDDLE: $BEGINNING-middle
+  ALTERNATIVE: $BEGINNING-error
+
+networks:
+  staging:
+    hosts:
+    - server0
+    - server2
+  production:
+    hosts:
+    - server3
+    - server4
+
+commands:
+  step1:
+    run: echo "Hey over there"
+  step2:
+    run: echo "Are you still there?"
+  warmup:
+    run: echo "Warming up"
+  jog:
+    run: echo "Jogging"
+
+targets:
+  walk:
+   - step1
+   - step2
+
+  run:
+   - warmup
+   - jog
+`
+	t.Run("no overwrites", func(t *testing.T) {
+		t.Parallel()
+		input := `
+---
+version: 0.6
+
+includes:
+  - supfile: master.yml
+`
+		withTmpDir(t, input, func(dirname string) {
+			err := writeSupfileAs(dirname, "master.yml", masterInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			outputs, options, err := setupMockEnv(dirname, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"staging", "walk"}
+			if err := runSupfile(testErrStream, options, args); err != nil {
+				t.Fatal(err)
+			}
+
+			m := newMatcher(outputs, t)
+			m.expectActivityOnServers(0, 2)
+			m.expectNoActivityOnServers(1)
+			m.expectCommandOnActiveServers(`echo "Hey over there"`)
+			m.expectCommandOnActiveServers(`echo "Are you still there?"`)
+		})
+	})
+
+	t.Run("overwrite network", func(t *testing.T) {
+		t.Parallel()
+
+		input := `
+---
+version: 0.6
+
+includes:
+  - supfile: master.yml
+
+networks:
+  staging:
+    hosts:
+    - server2
+`
+		withTmpDir(t, input, func(dirname string) {
+			err := writeSupfileAs(dirname, "master.yml", masterInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			outputs, options, err := setupMockEnv(dirname, 5)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Run("overwritten network", func(t *testing.T) {
+				args := []string{"staging", "step1"}
+				if err := runSupfile(testErrStream, options, args); err != nil {
+					t.Fatal(err)
+				}
+
+				m := newMatcher(outputs, t)
+				m.expectActivityOnServers(2)
+				m.expectNoActivityOnServers(0, 1)
+				m.expectCommandOnActiveServers(`echo "Hey over there"`)
+			})
+
+			t.Run("untouched network", func(t *testing.T) {
+				args := []string{"production", "step1"}
+				if err := runSupfile(testErrStream, options, args); err != nil {
+					t.Fatal(err)
+				}
+
+				m := newMatcher(outputs, t)
+				m.expectActivityOnServers(3, 4)
+				m.expectCommandOnActiveServers(`echo "Hey over there"`)
+			})
+		})
+	})
+
+	t.Run("overwrite command", func(t *testing.T) {
+		t.Parallel()
+
+		input := `
+---
+version: 0.6
+
+includes:
+  - supfile: master.yml
+
+commands:
+  step1:
+    run: echo "Overruled"
+    
+`
+		withTmpDir(t, input, func(dirname string) {
+			err := writeSupfileAs(dirname, "master.yml", masterInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Run("overwritten command", func(t *testing.T) {
+				outputs, options, err := setupMockEnv(dirname, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				args := []string{"staging", "step1"}
+				if err := runSupfile(testErrStream, options, args); err != nil {
+					t.Fatal(err)
+				}
+
+				m := newMatcher(outputs, t)
+				m.expectActivityOnServers(0, 2)
+				m.expectNoActivityOnServers(1)
+				m.expectCommandOnActiveServers(`echo "Overruled"`)
+			})
+
+			t.Run("untouched command", func(t *testing.T) {
+				outputs, options, err := setupMockEnv(dirname, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				args := []string{"staging", "step2"}
+				if err := runSupfile(testErrStream, options, args); err != nil {
+					t.Fatal(err)
+				}
+
+				m := newMatcher(outputs, t)
+				m.expectActivityOnServers(0, 2)
+				m.expectNoActivityOnServers(1)
+				m.expectCommandOnActiveServers(`echo "Are you still there?"`)
+			})
+		})
+	})
+
+	t.Run("overwrite target", func(t *testing.T) {
+		t.Parallel()
+
+		input := `
+---
+version: 0.6
+
+includes:
+  - supfile: master.yml
+
+commands:
+  cooldown:
+    run: echo "Cooling down"
+
+targets:
+  run:
+    - warmup
+    - jog
+    - cooldown
+`
+		withTmpDir(t, input, func(dirname string) {
+			err := writeSupfileAs(dirname, "master.yml", masterInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Run("overwritten target", func(t *testing.T) {
+				outputs, options, err := setupMockEnv(dirname, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				args := []string{"staging", "run"}
+				if err := runSupfile(testErrStream, options, args); err != nil {
+					t.Fatal(err)
+				}
+
+				m := newMatcher(outputs, t)
+				m.expectActivityOnServers(0, 2)
+				m.expectNoActivityOnServers(1)
+				m.expectCommandOnActiveServers(`echo "Warming up"`)
+				m.expectCommandOnActiveServers(`echo "Jogging"`)
+				m.expectCommandOnActiveServers(`echo "Cooling down"`)
+			})
+
+			t.Run("untouched target", func(t *testing.T) {
+				outputs, options, err := setupMockEnv(dirname, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				args := []string{"staging", "walk"}
+				if err := runSupfile(testErrStream, options, args); err != nil {
+					t.Fatal(err)
+				}
+
+				m := newMatcher(outputs, t)
+				m.expectActivityOnServers(0, 2)
+				m.expectNoActivityOnServers(1)
+				m.expectCommandOnActiveServers(`echo "Hey over there"`)
+				m.expectCommandOnActiveServers(`echo "Are you still there?"`)
+			})
+		})
+	})
+
+	t.Run("overwrite variables", func(t *testing.T) {
+		t.Parallel()
+
+		input := `
+---
+version: 0.6
+
+includes:
+  - supfile: master.yml
+
+env:
+  VAR_TO_BE_OVERWRITTEN: Overruled
+  SPECIFIC_VAR: I am not in the included
+`
+		withTmpDir(t, input, func(dirname string) {
+			err := writeSupfileAs(dirname, "master.yml", masterInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			outputs, options, err := setupMockEnv(dirname, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"staging", "step1"}
+			if err := runSupfile(testErrStream, options, args); err != nil {
+				t.Fatal(err)
+			}
+
+			m := newMatcher(outputs, t)
+			m.expectActivityOnServers(0, 2)
+			m.expectNoActivityOnServers(1)
+			m.expectExportOnActiveServers(`INCLUDED_VAR="I am included"`)
+			m.expectExportOnActiveServers(`VAR_TO_BE_OVERWRITTEN="Overruled"`)
+			m.expectExportOnActiveServers(`SPECIFIC_VAR="I am not in the included"`)
+		})
+	})
+
+	t.Run("overwrite variables with injection", func(t *testing.T) {
+		t.Parallel()
+
+		input := `
+---
+version: 0.6
+
+includes:
+  - supfile: master.yml
+    env:
+      - BEGINNING
+
+env:
+  BEGINNING: beginning
+  END: $MIDDLE-end
+  ALTERNATIVE: $BEGINNING-overruled
+`
+		withTmpDir(t, input, func(dirname string) {
+			err := writeSupfileAs(dirname, "master.yml", masterInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			outputs, options, err := setupMockEnv(dirname, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"staging", "step1"}
+			if err := runSupfile(testErrStream, options, args); err != nil {
+				t.Fatal(err)
+			}
+
+			m := newMatcher(outputs, t)
+			m.expectActivityOnServers(0, 2)
+			m.expectNoActivityOnServers(1)
+			m.expectExportOnActiveServers(`END="beginning-middle-end"`)
+			m.expectExportOnActiveServers(`ALTERNATIVE="beginning-overruled"`)
+		})
+	})
+}
+
 func withTmpDir(t *testing.T, input string, test func(dirname string)) {
 	dirname, err := tmpDir()
 	if err != nil {
