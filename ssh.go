@@ -144,6 +144,9 @@ func (c *SSHClient) ConnectWith(host string, dialer SSHDialFunc) error {
 		Auth: []ssh.AuthMethod{
 			c.authMethod,
 		},
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			return nil
+		},
 	}
 
 	c.conn, err = dialer("tcp", c.host, config)
